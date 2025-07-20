@@ -1,0 +1,6 @@
+pyzipper
+qrcode
+Pillow
+pyzbar
+numpy
+sympy
