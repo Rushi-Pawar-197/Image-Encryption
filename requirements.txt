@@ -1,6 +1,8 @@
-pyzipper
-qrcode
 Pillow
-pyzbar
 numpy
 sympy
+pycryptodome
+pyzipper
+qrcode
+pyzbar
+rich

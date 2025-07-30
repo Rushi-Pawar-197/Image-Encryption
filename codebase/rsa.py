@@ -1,6 +1,14 @@
 import sympy
 from typing import Tuple
 from pathlib import Path
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
+from Crypto.Util.Padding import pad, unpad
+
+from codebase import utility as util
+from codebase import constants as const
+
+
 
 # Optional paths (safe to ignore if unused)
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -37,8 +45,13 @@ def generate_large_prime(bits) -> int:
 
 
 # ─── Key Generation ───────────────────────────────────────────
-def generate_rsa_keys(bits: int = 1024) -> Tuple[int, int, int]:
+def generate_keys(bits: int = 4096) -> Tuple[int, int, int]:
+    util.rich_divider()
     print("\n🔐 Generating RSA keys …\n")
+
+    AES_key = get_random_bytes(16)  # AES-128
+    const.AES_key = AES_key
+
     while True:
         p = generate_large_prime(bits // 2)
         q = generate_large_prime(bits // 2)
@@ -52,7 +65,12 @@ def generate_rsa_keys(bits: int = 1024) -> Tuple[int, int, int]:
             break
         except ZeroDivisionError:
             continue
-    return e, d, n
+
+    const.RSA_e = e
+    const.RSA_d = d
+    const.RSA_n = n
+
+    return AES_key, [e, d, n]
 
 
 # ─── Internal Helpers ─────────────────────────────────────────
@@ -69,46 +87,98 @@ def _int_to_bytes_fixed(x, size):
 _LENGTH_TRAILER = 4  # Number of bytes to store the original message length
 
 
-def encrypt_blob(blob: bytes, e: int, n: int) -> bytes:
-    """Encrypt any blob (bytes) with RSA. Returns bytes ready to write."""
-    key_size = (n.bit_length() + 7) // 8
-    max_plain = key_size - 1  # Leave 1 byte room to ensure plaintext < n
+# def rsa_encrypt(blob: bytes, e: int, n: int) -> bytes:
+#     """Encrypt any blob (bytes) with RSA. Returns bytes ready to write."""
+#     key_size = (n.bit_length() + 7) // 8
+#     max_plain = key_size - 1  # Leave 1 byte room to ensure plaintext < n
 
-    _LENGTH_TRAILER = 4  # Number of bytes to store original length
+#     _LENGTH_TRAILER = 4  # Number of bytes to store original length
 
-    # Append original length (trailer) at the end of the blob
+#     # Append original length (trailer) at the end of the blob
+#     orig_len = len(blob)
+#     blob += orig_len.to_bytes(_LENGTH_TRAILER, "big")
+
+#     cipher_chunks = []
+#     for chunk in _chunk_bytes(blob, max_plain):
+#         m = int.from_bytes(chunk, "big")
+#         if m >= n:
+#             raise ValueError("❌ Plaintext chunk >= modulus; use larger key size.")
+#         c = pow(m, e, n)
+#         cipher_chunks.append(c.to_bytes(key_size, "big"))
+
+#     return b"".join(cipher_chunks)
+
+
+# def rsa_decrypt(cipher: bytes, d: int, n: int) -> bytes:
+#     key_size = (n.bit_length() + 7) // 8
+#     max_plain = key_size - 1
+#     _LENGTH_TRAILER = 4
+
+#     plain_chunks = []
+#     for c_chunk in _chunk_bytes(cipher, key_size):
+#         c = int.from_bytes(c_chunk, "big")
+#         m = pow(c, d, n)
+
+#         # Convert m to natural byte size, then pad if needed
+#         chunk = m.to_bytes((m.bit_length() + 7) // 8, "big")
+#         chunk = chunk.rjust(max_plain, b"\x00")  # ← ensures alignment
+#         plain_chunks.append(chunk)
+
+#     full_plain = b"".join(plain_chunks)
+
+#     orig_len = int.from_bytes(full_plain[-_LENGTH_TRAILER:], "big")
+#     recovered = full_plain[:orig_len]
+
+#     return recovered
+
+def rsa_encrypt(plaintext: str, e: int, n: int) -> bytes:
+    """
+    Encrypts a UTF-8 string using RSA and returns ciphertext bytes.
+    Suitable for short strings like keys, tokens, etc.
+    """
+    m = int.from_bytes(plaintext.encode("utf-8"), "big")
+    if m >= n:
+        raise ValueError("❌ String too large to encrypt with this RSA key.")
+    c = pow(m, e, n)
+    return c.to_bytes((n.bit_length() + 7) // 8, "big")
+
+
+def rsa_decrypt(ciphertext: bytes, d: int, n: int) -> str:
+    """
+    Decrypts RSA ciphertext bytes and returns the original UTF-8 string.
+    """
+    c = int.from_bytes(ciphertext, "big")
+    m = pow(c, d, n)
+    plain_bytes = m.to_bytes((m.bit_length() + 7) // 8, "big")
+    return plain_bytes.decode("utf-8")
+
+
+# AES encryption
+
+_LENGTH_TRAILER = 4
+BLOCK_SIZE = AES.block_size  # 16 bytes
+
+def aes_encrypt(blob: bytes, key: bytes) -> bytes:
+    iv = get_random_bytes(BLOCK_SIZE)
+
+    # Append original length to blob (like your RSA logic)
     orig_len = len(blob)
     blob += orig_len.to_bytes(_LENGTH_TRAILER, "big")
 
-    cipher_chunks = []
-    for chunk in _chunk_bytes(blob, max_plain):
-        m = int.from_bytes(chunk, "big")
-        if m >= n:
-            raise ValueError("❌ Plaintext chunk >= modulus; use larger key size.")
-        c = pow(m, e, n)
-        cipher_chunks.append(c.to_bytes(key_size, "big"))
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    encrypted = cipher.encrypt(pad(blob, BLOCK_SIZE))
 
-    return b"".join(cipher_chunks)
+    # Return IV + ciphertext
+    return iv + encrypted
 
+def aes_decrypt(ciphertext: bytes, key: bytes) -> bytes:
+    iv = ciphertext[:BLOCK_SIZE]
+    encrypted = ciphertext[BLOCK_SIZE:]
 
-def decrypt_blob(cipher: bytes, d: int, n: int) -> bytes:
-    key_size = (n.bit_length() + 7) // 8
-    max_plain = key_size - 1
-    _LENGTH_TRAILER = 4
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    padded_blob = cipher.decrypt(encrypted)
+    blob = unpad(padded_blob, BLOCK_SIZE)
 
-    plain_chunks = []
-    for c_chunk in _chunk_bytes(cipher, key_size):
-        c = int.from_bytes(c_chunk, "big")
-        m = pow(c, d, n)
-
-        # Convert m to natural byte size, then pad if needed
-        chunk = m.to_bytes((m.bit_length() + 7) // 8, "big")
-        chunk = chunk.rjust(max_plain, b"\x00")  # ← ensures alignment
-        plain_chunks.append(chunk)
-
-    full_plain = b"".join(plain_chunks)
-
-    orig_len = int.from_bytes(full_plain[-_LENGTH_TRAILER:], "big")
-    recovered = full_plain[:orig_len]
-
-    return recovered
+    # Extract original length
+    orig_len = int.from_bytes(blob[-_LENGTH_TRAILER:], "big")
+    return blob[:orig_len]
