@@ -3,19 +3,21 @@ from datetime import datetime
 from pathlib import Path
 import pyzipper
 import os
-import qrcode
-from PIL import Image
-from pyzbar.pyzbar import decode
 import sys
 import random
 from base64 import b64encode, b64decode
-import ast  # To safely convert string representation of bytes back to bytes
+import ast
 import hashlib
 import base64
 import re
+import zlib
+import tempfile, shutil
+from rich.console import Console
+from rich.highlighter import NullHighlighter
+from rich.prompt import Prompt
 
 from codebase import constants as const
-from codebase import rsa
+from codebase import cipher
 
 # Base directory to root of project
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -23,23 +25,25 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Define paths
 keys_path = BASE_DIR / "keys"
 output_path = BASE_DIR / "output"
-zip_src_dir = BASE_DIR / "output/bin"
 dict_path = BASE_DIR / "codebase/data/map.json"
+receive_dir = BASE_DIR / "output/receive"
+
+zip_src_dir = BASE_DIR / "output/bin"
+zip_dest_path = BASE_DIR / "output/send/archive.zip"
+
+zip_src_path = BASE_DIR / "output/send/archive.zip"
+zip_dest_dir = BASE_DIR / "output/bin"
+
+bundle_dir = BASE_DIR / "output/send/"
+bundle_dest = BASE_DIR / "output/send/bundle.zip"
 
 
 json_path = keys_path / "pub_private.json"
-send_qr_output_path = output_path / "send/qr_code.png"
+send_dat_output_path = output_path / "send/try_figuring_it_out.dat"
 receive_json_output_path = output_path / "receive/pub_private.json"
 aes_key_path = output_path / "bin" / f"{const.timestamp_literal}.txt"
 
 # ─── RSA Key Save/Load ───────────────────────────────────────────────────────────
-
-# === Rich Console Setup ===
-from rich.console import Console
-from rich.highlighter import NullHighlighter
-from rich.panel import Panel
-from rich.prompt import Prompt
-from rich.align import Align
 
 console = Console(
     file=sys.stdout,
@@ -53,12 +57,14 @@ console = Console(
 def log(msg):
     console.print(msg)
 
+
 import sys
 from rich.prompt import Prompt
 
+
 def prompt_model_choice():
     # Header
-    log("[magenta]🛡️   Choose your action:[/magenta]\n")
+    log("\n\n[dark_orange]🛡️   Choose your action:[/dark_orange]\n")
 
     # Display menu
     max_len = max(len(label) for label in const.labels)
@@ -105,6 +111,7 @@ def format_time(elapsed_time):
 
     return " ".join(parts)
 
+
 def rich_divider(char="-", label=None, head_tail=["", ""]):
     label_text = f" {label} " if label else ""
     total_fill = (
@@ -132,11 +139,11 @@ def save_keys(d, n):
 
     data = {
         "timestamp": timestamp,
-        "x": str(d_dirty),     # instead of "d"
-        "y": str(n_dirty),     # instead of "n"
-        "nonce": "ZT49x67!kL", # dummy noise
+        "x": str(d_dirty),  # instead of "d"
+        "y": str(n_dirty),  # instead of "n"
+        "nonce": "ZT49x67!kL",  # dummy noise
         "id": "pkgv4.2",
-        "sig": hex((d_dirty ^ n_dirty) & 0xFFFFFFFF)
+        "sig": hex((d_dirty ^ n_dirty) & 0xFFFFFFFF),
     }
 
     json_str = json.dumps(data)
@@ -147,13 +154,12 @@ def save_keys(d, n):
     with open(filepath, "w") as f:
         json.dump(encoded, f, indent=4)
 
-    log(f"\n🔑 --> Keys saved to [blue]{filepath}[/blue]\n")
-    # print("[KEY FILE PATH]:", filepath.resolve())
-    json_to_qr(json_path, send_qr_output_path)
+    json_to_dat(json_path, send_dat_output_path)
 
-def load_keys(filepath=send_qr_output_path):
+
+def load_keys(filepath=send_dat_output_path):
     # Step 1: Read and decode the data from the QR
-    keys = qr_to_json(qr_image_path=filepath)
+    keys = dat_to_json(filepath)
 
     # Step 2: Get the base64-encoded reversed JSON string
     encoded = keys if isinstance(keys, str) else keys.get("encoded")
@@ -182,8 +188,8 @@ def load_keys(filepath=send_qr_output_path):
     return d, n
 
 
-def load_rsa_keys(filepath=send_qr_output_path):
-    keys = qr_to_json(qr_image_path=filepath)
+def load_rsa_keys(filepath=send_dat_output_path):
+    keys = dat_to_json(filepath)
     d = int(keys["d"])
     n = int(keys["n"])
     log(f"\n🔑 <-- Keys loaded from [blue]{filepath}[/blue]\n")
@@ -197,18 +203,20 @@ def save_as_zip(input_dir, output_zip):
     input_dir = Path(input_dir).resolve()
     output_zip = Path(output_zip).resolve()
 
-    with pyzipper.AESZipFile(
-        output_zip, "w", compression=pyzipper.ZIP_STORED
-    ) as zf:
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+
+    with pyzipper.AESZipFile(tmp_path, "w", compression=pyzipper.ZIP_STORED) as zf:
         for root, _, files in os.walk(input_dir):
             for file in files:
                 filepath = Path(root) / file
                 arcname = filepath.relative_to(input_dir)
                 zf.write(filepath, arcname)
 
-    log(f"\n📦 --> Zip created at: [blue]{output_zip}[/blue]\n")
+    shutil.move(tmp_path, output_zip)
 
-def extract_zip(input_zip, output_dir):
+
+def extract_zip(input_zip, output_dir, delete_after=False):
     input_zip = Path(input_zip).resolve()
     output_dir = Path(output_dir).resolve()
 
@@ -218,15 +226,33 @@ def extract_zip(input_zip, output_dir):
 
     try:
         with pyzipper.AESZipFile(input_zip, "r") as zf:
-            zf.extractall(path=output_dir)
+            # ✅ Ensure output dir exists
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # ✅ Prevent extracting over the zip itself if inside same folder
+            for name in zf.namelist():
+                out_path = output_dir / name
+                if out_path.resolve() == input_zip:
+                    continue
+                zf.extract(name, path=output_dir)
+
         log(f"\n📦 <-- Zip extracted at: [blue]{output_dir}[/blue]")
+
+        # ✅ Delete the zip file after extraction if requested
+        if delete_after:
+            try:
+                input_zip.unlink()
+                log(f"🗑️  Deleted archive: [red]{input_zip}[/red]")
+            except Exception as cleanup_err:
+                print(f"⚠️ Could not delete zip file: {cleanup_err}")
+
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"❌ Error extracting {input_zip.name}: {e}")
 
 
-def save_encrypt_aes(e,n):
+def save_encrypt_aes(e, n):
     rich_divider()
-    encrypted_AES = rsa.rsa_encrypt(b64encode(const.AES_key).decode("utf-8"),e,n)
+    encrypted_AES = cipher.rsa_encrypt(b64encode(const.AES_key).decode("utf-8"), e, n)
     file_path = zip_src_dir / f"{const.timestamp_literal}.txt"
 
     with open(file_path, "w", encoding="utf-8") as f:
@@ -241,46 +267,53 @@ def load_aes_key(keys, filepath=aes_key_path):
         encrypted_bytes = ast.literal_eval(encrypted_str)  # Safer than eval()
 
     # Decrypt using RSA
-    decrypted_b64_str = rsa.rsa_decrypt(encrypted_bytes, d, n)
+    decrypted_b64_str = cipher.rsa_decrypt(encrypted_bytes, d, n)
 
     # Base64-decode to get original AES key
     AES_key = b64decode(decrypted_b64_str)
     return AES_key
 
 
-# ─── QR Helpers ───────────────────────────────────────────────────────────────
+# ─── DAT Helpers ───────────────────────────────────────────────────────────────
 
 
-def json_to_qr(json_path, qr_output_path):
+def json_to_dat(json_path, dat_output_path):
+    # Load JSON
     with open(json_path, "r") as f:
         data = json.load(f)
 
+    # Serialize -> compress -> base64 encode
     json_str = json.dumps(data)
+    compressed = zlib.compress(json_str.encode("utf-8"))
+    encoded = base64.b64encode(compressed)
 
-    qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_L)
-    qr.add_data(json_str)
-    qr.make(fit=True)
+    # Save as .dat
+    if os.path.exists(dat_output_path):
+        os.remove(dat_output_path)
 
-    img = qr.make_image(fill_color="black", back_color="white")
+    with open(dat_output_path, "wb") as f:
+        f.write(encoded)
 
-    if os.path.exists(qr_output_path):
-        os.remove(qr_output_path)
-
-    img.save(qr_output_path)
-    log(f"📄 --> Keys-QR code saved to: [blue]{qr_output_path}[/blue]\n\n")
+    log(f"📄 --> Keys saved to: [blue]{dat_output_path}[/blue]\n\n")
 
 
-def qr_to_json(qr_image_path, output_json_path=None):
-    img = Image.open(qr_image_path)
-    decoded_objs = decode(img)
+def dat_to_json(dat_path, output_json_path=None):
+    # Read binary
+    with open(dat_path, "rb") as f:
+        encoded = f.read()
 
-    if not decoded_objs:
-        raise ValueError("❌ No QR code found in image.")
+    # Base64 decode -> decompress -> parse JSON
+    compressed = base64.b64decode(encoded)
+    json_str = zlib.decompress(compressed).decode("utf-8")
+    json_data = json.loads(json_str)
 
-    data = decoded_objs[0].data.decode("utf-8")
-    json_data = json.loads(data)
+    # Optionally dump back to a JSON file
+    if output_json_path:
+        with open(output_json_path, "w") as f:
+            json.dump(json_data, f, indent=4)
 
     return json_data
+
 
 def clean_up(directories: list[str | Path]):
     """Delete all files from multiple directories, ignoring non-existent ones."""
@@ -298,15 +331,20 @@ def clean_up(directories: list[str | Path]):
                     print(f"⚠️  Could not delete {item.name} from {dir_path}: {e}")
 
 
-def derive_secret_components(passphrase: str, salt: bytes = b"MyFixedSalt", iterations: int = 100_000) -> tuple[int, int]:
+def derive_secret_components(
+    passphrase: str, salt: bytes = b"MyFixedSalt", iterations: int = 100_000
+) -> tuple[int, int]:
     # Derive 64 bytes (512 bits)
-    derived = hashlib.pbkdf2_hmac("sha256", passphrase.encode(), salt, iterations=iterations, dklen=64)
+    derived = hashlib.pbkdf2_hmac(
+        "sha256", passphrase.encode(), salt, iterations=iterations, dklen=64
+    )
 
     # Split into two 32-byte halves for A and B
     A = int.from_bytes(derived[:32], byteorder="big")
     B = int.from_bytes(derived[32:], byteorder="big")
-    
+
     return A, B
+
 
 def fetch_passphrase(master_code: str) -> str:
     # Load the dictionary
@@ -318,7 +356,7 @@ def fetch_passphrase(master_code: str) -> str:
     if len(chunks) != 12 or not chunks.isdigit():
         raise ValueError("❌ Master code must be 12 digits long (e.g., 3248-7110-9831)")
 
-    parts = [chunks[i:i+4] for i in range(0, 12, 4)]
+    parts = [chunks[i : i + 4] for i in range(0, 12, 4)]
 
     # Map each 4-digit number to its value in the dictionary
     try:
@@ -328,14 +366,18 @@ def fetch_passphrase(master_code: str) -> str:
 
     return "".join(words)  # or "-".join(words) if you want them joined with hyphens
 
+
 def generate_master_code() -> str:
     parts = [str(random.randint(1000, 9999)) for _ in range(3)]
     return "-".join(parts)
 
+
 def read_master_code() -> str:
     while True:
         rich_divider()
-        code = console.input("\n[bright_red bold]🛡️  Paste master code here[/bright_red bold] : ")
+        code = console.input(
+            "\n[bright_yellow bold]🛡️  Paste Master-code here[/bright_yellow bold] : "
+        )
         digits_only = re.sub(r"\D", "", code)
 
         if len(digits_only) == 12:
@@ -343,3 +385,61 @@ def read_master_code() -> str:
             return digits_only  # Or return `formatted` if needed
         else:
             console.print("❌ Must be exactly 12 digits.")
+
+
+def sanitize_filename(name: str) -> str:
+    """
+    Replace spaces with underscores and remove risky characters.
+    Keeps only letters, numbers, underscores, dashes, and dots.
+    """
+    name = name.replace(" ", "_")
+    # Strip anything that's not safe for filenames
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name)
+
+
+def preprocess_data_dir(data_dir: str):
+    """
+    Sanitize all file names inside data_dir (non-recursive).
+    Renames files in-place, replacing spaces and unsafe characters.
+    """
+    for fname in os.listdir(data_dir):
+        old_path = os.path.join(data_dir, fname)
+
+        if os.path.isfile(old_path):
+            name, ext = os.path.splitext(fname)
+            safe_name = sanitize_filename(name) + ext
+            new_path = os.path.join(data_dir, safe_name)
+
+            # Rename only if different
+            if new_path != old_path:
+                os.rename(old_path, new_path)
+
+
+def print_configuration():
+    rich_divider(label="⚙️  Configuration ⚙️")
+    log(
+        f"\n🗝️  RSA : [bold cyan]{const.RSA_BITS}[/bold cyan] bits\n"
+        f"🛡️  AES : [bold cyan]{const.AES_BITS * 8}[/bold cyan] bits\n\n"
+    )
+
+
+def save_bundle_zip():
+    save_as_zip(zip_src_dir, zip_dest_path)
+
+    # ZIP the keys & the .zip of bin files
+    save_as_zip(bundle_dir, bundle_dest)
+
+    for item in bundle_dir.iterdir():
+        if item != bundle_dest:
+            if item.is_file():
+                item.unlink()
+            else:
+                shutil.rmtree(item)
+
+    log(f"\n📦 --> Bundle Zip created at: [blue]{bundle_dest}[/blue]\n")
+
+
+def extract_bundle_zip():
+    extract_zip(bundle_dest, bundle_dir, delete_after=True)
+    rich_divider()
+    extract_zip(zip_src_path, zip_dest_dir)

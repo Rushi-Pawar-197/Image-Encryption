@@ -1,6 +1,5 @@
-
-emojis = ['🔐','🔓', '🗑️', '🚪']
-labels = ['Send','Receive',' Clean-up','Exit']
+emojis = ["🔐", "🔓", "🗑️", "🚪"]
+labels = ["Send", "Receive", " Clean-up", "Exit"]
 job_names = ["Send", "Receive"]
 line_width = 115
 timestamp_literal = "2025-07-25_10-08-19-288119"
@@ -13,5 +12,10 @@ clean_up_post = ["output/bin"]
 RSA_e = 0
 RSA_d = 0
 RSA_n = 0
+
+RSA_BITS = 4096
+AES_BITS = 32
+
+EXT_SHIFT = 11
 
 master_code = ""
