@@ -1,130 +1,120 @@
-# 🔐 Image Encryption Tool
+# 🔐 File Encryption Tool
 
-Securely encrypt and decrypt images using **AES-256** and **RSA-4096** with a hardened QR-based key-sharing mechanism and a single master code for protection.
+A secure file encryption and decryption system built with **RSA-4096 + AES-256**, reinforced by a **random 12-digit Master Code**. The Master Code is transformed into a **48-character derived string**, which is then used to construct key material (`A` and `B`) that provides additional layers of protection.
 
----
-
-## 🚀 Features
-
-- 📂 **Encrypts any image folder** and compresses into a `.zip`
-- 🔑 **Generates strong RSA key pair** (4096-bit)
-- 🔒 **Encrypts using AES-256**, AES key protected via RSA
-- 📄 **Saves key info as obfuscated, base64-encoded QR code**
-- 🧠 **Single master code (e.g., `3248-7110-9831`)** derives hidden secrets (no need to store keys)
-- 🧪 **Decryption recovers original images in seconds**
-- ❌ **No password on ZIP** – master code is the only secret needed
-- 🌈 **Beautiful terminal output with `rich`** for clarity
+This ensures that even if RSA/AES keys were somehow accessed directly, without the correct Master Code and mapping logic, decryption is infeasible.
 
 ---
 
-## 🧰 Setup Instructions
+## ✨ Features
 
-Make sure you're using **Python 3.8+** and run the following to get started:
+* **Hybrid Encryption:** Combines RSA-4096 (for key encapsulation) with AES-256 (for file encryption).
+* **Master Code Protection:** 12-digit Master Code → 3 × 4-digit segments → mapped to 16-character strings → concatenated into a **48-char string**, which is then used to construct key materials `A` and `B`.
+* **Random Master Code Generation:** Each encryption run generates a fresh Master Code and keypair.
+* **Cross-Platform:** Works on any system with Python 3.11+.
+* **Rich CLI Interface:** Emoji + styled logging for clarity.
+* **Automatic Packaging:** Encrypted files and metadata bundled into a ZIP.
+* **Clean-up Utility:** Removes data and all temporary files after operation. (Useful for a clean start)
 
-```bash
-# Clone this repo and navigate to the project
-python -m venv venv
-venv\Scripts\activate
+---
 
-pip install -r requirements.txt
+## 🚀 Quick Start
+
+1. Place files inside `/data/`
+2. Run: `python main.py`
+3. Share the generated `bundle.zip` + Master Code
+4. Receiver runs `python main.py` with `bundle.zip` → files restored
+
+---
+
+## ⚠️ File Size Note
+
+* Encryption/decryption works best up to \~1.5 GB files on an 8 GB RAM system.
+* Very large files (e.g., 4 GB videos) may fail due to memory limits.
+* Actual limit depends on available RAM.
+
+---
+
+## 🔒 Security
+
+* **RSA-4096 + AES-256 Hybrid Encryption**
+* **Master Code Strength:** 12-digit Master Code = 10^12 combinations.
+* **Derived String Strength:** Each Master Code maps to a **48-char string**, expanding entropy dramatically.
+* **Combined Security Estimate:** RSA-4096 + AES-256 + Master Code entropy + derived 48-char mappings.
+* **Independence:** Each encryption run generates a fresh RSA-4096 + AES-256 keypair.
+* **Master Code Safety:** The Master Code is randomly generated during encryption. Even if by chance the same Master Code appears in two sessions, they remain cryptographically independent and secure.
+* ⚠️ **If the Master Code is lost, files cannot be recovered.**
+
+---
+
+| Component                  | Role in Encryption                                    | Strength / Entropy                                                                   |
+| -------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| **RSA-4096**               | Protects AES key and ensures secure key exchange      | \~150+ bits equivalent classical security (considered unbreakable with current tech) |
+| **AES-256**                | Encrypts file contents (any file format, byte-level)  | 256-bit symmetric security                                                           |
+| **12-digit Master Code**   | User input for key derivation, mapped to lookup table | 10¹² combinations (\~40 bits)                                                        |
+| **48-char Derived String** | Generated from Master Code via lookup mapping         | Extremely high entropy (≈ 280 bits depending on charset)                             |
+| **Combined System**        | Hybrid of RSA + AES + Master Code + Lookup            | Practically unbreakable without correct Master Code                                  |
+
+
+---
+
+## 🛠️ Extensibility
+
+* Extend preprocessing in `utility.py` to support directories instead of flat files.
+* Modify Rich config in `utility.py` to customize logging style.
+
+---
+
+## 📦 File Structure
+
+```
+/project-root
+│── main.py              # Entry point
+│── codebase/
+│   ├── constants.py     # Fixed values & mappings
+│   ├── data_processing.py  # Encryption/Decryption logic
+│   ├── utility.py       # Logging, helpers, cleanup
+│   └── __init__.py
+│
+│── data/                # Input files for encryption
+│── output/              # Encrypted/Decrypted results
 ```
 
 ---
 
-## 🧠 How It Works
+## ⚡ Example Run
 
-### 1. Encryption
-
-```bash
-python main.py
-```
-
-- Choose option `1` to Send
-- 🔐 RSA keys are generated (`d`, `n`)
-- 🤯 These keys are **mathematically dirtied** using A & B derived from a 12-digit master code
-- 🔒 AES encrypts each image
-- 🗃️ Encrypted AES key is stored alongside encrypted `.bin` files in a ZIP
-- 📄 Keys (now dirty) are saved in **obfuscated JSON → base64 → QR**
-- ✅ Final master code like `1994-6211-1540` is shown only once!
-
-📦 **Output:**
-```
-output/send/archive.zip      # Contains encrypted files + AES key (RSA-encrypted)
-output/send/qr_code.png      # Contains encrypted RSA private key (dirty)
-```
-
----
-
-### 2. Decryption
-
-```bash
-python main.py
-```
-
-- Choose option `2` to Receive
-- Paste the **12-digit master code**
-- 🔓 RSA private key is **undirtied** using A & B from master code
-- 🧠 AES key is decrypted
-- 📂 Images are fully recovered
-
-📂 **Output:**
-```
-output/receive/*.png
-```
-
----
-
-## 🔐 Security Architecture
-
-| Layer | Algorithm | Strength |
-|-------|-----------|----------|
-| RSA   | 4096 bits | Military-grade public-key encryption |
-| AES   | 256 bits  | Secure symmetric encryption |
-| Obfuscation | Base64 + reverse + noise | Hides actual key structure in QR |
-| Master Secret | 12-digit code → A & B | Secret never saved anywhere |
-| QR Encoding | Holds encoded key data | Human-shareable, machine-protected |
-
-🛡️ **Even if ZIP and QR are leaked, without the master code, decrypting is infeasible.**
-
----
-
-## 💬 Example Run
+**Encryption:**
 
 ```
-🛡️   Choose your action:
-    [1]   🔐  Send    
-    [2]   🔓  Receive 
-    [3]   🚪  Clean-up
-    [4]   🚪  Exit    
-
 >: 1
-
-🔐 Generating RSA keys...
-📄 --> Keys-QR code saved to: output/send/qr_code.png
-📦 --> Zip created at: output/send/archive.zip
-🛡️  Master code  : 1994-6211-1540
+🚀 Initiating Encryption
+📦 Files collected
+🔑 Master Code generated: 9037-9602-1574
+📦 Bundle created at /output/send/bundle.zip
 ```
+
+**Decryption (with wrong Master Code):**
 
 ```
 >: 2
-
-🛡️  Paste master code here : 1994-6211-1540
-
-📦 <-- Zip extracted at: output/bin
-🔑 <-- Keys loaded from: output/send/qr_code.png
-✅🔓  Decrypted in 3s   ⏱
+🚀 Initiating Decryption
+📦 <-- Zip extracted
+🔑 <-- Keys loaded
+⚠️   RSA decryption unsuccessful
+🔑  Could not retrieve AES key
+💥  Execution aborted
+💡  Verify the Master-code and try again
 ```
 
 ---
 
-## 🧼 Clean-up (Optional)
+## 🗑️ Clean-up
 
-Choose option `3` from the menu to empty all intermediate directories, including the '/data' directory.
+Removes all files in '/data', all temporary archives and bin files after send/receive to keep the environment safe.
 
 ---
 
-## 📌 Final Notes
+## 📜 License
 
-- Only **master code** must be kept safe.
-- QR and zip can be transmitted publicly.
-- Designed for **personal or research-grade secure communication.**
+MIT License. Free to use and modify.
